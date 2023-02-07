@@ -2,9 +2,10 @@ import * from Minecraft;
 import Java from util.Internal;
 import * from minecraft.CommandUtils;
 import * from util.Futures;
-import * from minecraft.AreaParallelUtils;
+import * from minecraft.BoxUtils;
 import RGB from minecraft.ColorCodes;
 import * from minecraft.PosUtils;
+import * from util.Json;
 client = MinecraftClient.getClient();
 player = client.getPlayer();
 world = client.getWorld();
@@ -19,8 +20,8 @@ safetyLimit = 20000000;
 StreamSupportStream = Java.getStaticMethodDelegate("java.util.stream.StreamSupport", "stream", 2);
 BlockPosIterate = Java.getStaticMethodDelegate("net.minecraft.util.math.BlockPos","iterate", 2);
 CollectorList = Java.getStaticMethodDelegate('java.util.stream.Collectors', "toList", 0);
-BooleanValueOf = Java.getStaticMethodDelegate('java.lang.Boolean', 'valueOf', 1);
 globalBoxes = {};
+positionHashSet = Set.of();
 Refresh = false;
 renderOnce = false;
 setCenter = false;
@@ -32,7 +33,18 @@ opacity = 10;
 outlinePixelWidth = 0;
 outlineColor = 0;
 renderThroughBlocks = true;
+new GameEvent("onDimensionChange", fun(newWorld) {
+    player = client.getPlayer();
+    center = player.getPos();
+    world = newWorld;
+    // Code
+});
 
+fun refresh(){
+    player = client.getPlayer();
+    center = player.getPos();
+    world = client.getWorld();
+}
 fun isWithinRange(checkPos, p1, p2){
     mx = Math.min(p1.getX(), p2.getX());
     my = Math.min(p1.getY(), p2.getY());
@@ -50,7 +62,7 @@ strategyPureArucas = fun (area, functions, args,  applyFunc) {
         total = area.getBlockCount();
         _ii = 0;
         percentage = 0;
-        foreach ( positions : world.getPositions(area.pos1.asPos(), area.pos2.asPos())){
+        foreach ( positions : world.getPositions(area.pos1, area.pos2)){
             _ii ++;
             currentPerc = Math.floor(_ii / total * 100);
             if (currentPerc != percentage){
@@ -107,10 +119,10 @@ fun iterateFunAsync(xreach,yreach, zreach, function, arguments, apply){
     }
     areas = null;
     if (startPos != null && endPos != null){
-        areas = new DivideArea(new PosWithFun(startPos), new PosWithFun(endPos)).divideBy(xThreads,yThreads,zThreads);
+        areas = new Box(startPos, endPos).divideBy(xThreads,yThreads,zThreads);
     }
     else {
-        areas = new DivideArea(new PosWithFun(sx-xr, sy-yr, sz-zr), new PosWithFun(sx+xr, sy+yr, sz+zr)).divideBy(xThreads,yThreads,zThreads);
+        areas = new Box(new Pos(sx-xr, sy-yr, sz-zr), new Pos(sx+xr, sy+yr, sz+zr)).divideBy(xThreads,yThreads,zThreads);
     }
     tasks = [];
     i = 0;
@@ -134,7 +146,7 @@ fun iterateFunDirect(xreach,yreach, zreach, function, arguments, apply){
     sx = centerAs.getX().round();
     sy = centerAs.getY().round();
     sz = centerAs.getZ().round();
-    streamInit = BlockPosIterate(new PosWithFun(sx-xreach, sy-yreach, sz-zreach).asJavaPos(), new PosWithFun(sx+xreach, sy+yreach, sz+zreach).asJavaPos()).spliterator();
+    streamInit = BlockPosIterate(new Pos(sx-xreach, sy-yreach, sz-zreach), new Pos(sx+xreach, sy+yreach, sz+zreach)).spliterator();
     return StreamSupportStream(streamInit, Java.valueOf(false)).
                 filter(Java.predicateOf(fun(a){ val = function(a, arguments); return val != false && val != null;})).
                 map(Java.functionOf(fun(a){return apply(a, function(a, arguments));})).
@@ -155,14 +167,14 @@ fun iterateFunLazy(xreach,yreach, zreach, function, arguments, apply){
     sy = centerAs.getY().round();
     sz = centerAs.getZ().round();
     lambda  = fun (){
-    streamInit = BlockPosIterate(new PosWithFun(sx-xreach, sy-yreach, sz-zreach).asJavaPos(), new PosWithFun(sx+xreach, sy+yreach, sz+zreach).asJavaPos()).spliterator();
+    streamInit = BlockPosIterate(new Pos(sx-xreach, sy-yreach, sz-zreach).asJavaPos(), new Pos(sx+xreach, sy+yreach, sz+zreach).asJavaPos()).spliterator();
     return StreamSupportStream(streamInit, Java.valueOf(false)).
                 filter(Java.predicateOf(fun(a){ val = function(a, arguments); return val != false && val != null;})).
                 map(Java.functionOf(fun(a){return apply(a, function(a, arguments));})).
                 filter(Java.predicateOf(fun(a){return a != false && a != null;})).
                 collect(CollectorList()).toArucas();
     };
-    lazyValue = Thread.runAsync(lambda);
+    lazyValue = Thread.runThreaded(lambda);
     return lazyValue;
 }
 
@@ -174,13 +186,20 @@ compareOptions = {
 strategy = 'Async';
 options = {'Async' : iterateFunAsync, 'Lazy' : iterateFunLazy, 'Direct' : iterateFunDirect};
 fun renderBoxWhateverColorFromMap(position, color){
+
     box = new BoxShape(position);
     box.setColour(color.hexcode);
     if (outlinePixelWidth > 0){
         box.setOutlineColor(outlineColor);
         box.setOutlinePixelWidth(outlinePixelWidth);
     }
-    box.setOpacity(opacity);
+    if (color.notify){
+        if (!positionHashSet.contains(position)){
+            positionHashSet.add(position);
+            player.message('Found '+ color.name+ ' at '+ position);
+        }
+    }
+    box.setOpacity(color.opacity);
     box.setRenderThroughBlocks(renderThroughBlocks);
     return box;
 }
@@ -319,11 +338,36 @@ class VarRGB{
     var r;
     var g;
     var b;
+    var hexcode;
+    var opacity;
+    //optional
+    var name = null;
+    var notify = false;
     VarRGB(r,g,b){
         this.r = r;
         this.g = g;
         this.b = b;
         this.hexcode = b+ 256 * g + 65536 * r;
+        this.opacity = opacity;
+    }
+    VarRGB(r,g,b, o) {
+        this.r = r;
+        this.g = g;
+        this.b = b;
+        this.hexcode = b+ 256 * g + 65536 * r;
+        this.opacity = o;
+    }
+    fun toList(){
+        return [this.r, this.g, this.b, this.opacity];
+    }
+    static fun fromList(value){
+        if (len(value) == 3){
+            return new VarRGB(value.get(0), value.get(1), value.get(2));
+        }
+        return new VarRGB(value.get(0), value.get(1), value.get(2), value.get(3));
+    }
+    static fun fromRGB(rgb) {
+        return new VarRGB(rgb.R, rgb.G, rgb.B);
     }
 }
 //tasks
@@ -394,13 +438,52 @@ safetyCountTask = fun (newVal){
     player.message("Safety count is now set to " + safetyLimit);
 };
 addSearchTask = fun (newVal,colour){
+    colour = VarRGB.fromRGB(colour);
     mapping.put(newVal, colour);
     //Refresh = true;
     player.message("Toggled " +newVal + " search");
 };
-
+addSearchOpacityTask = fun (newVal,colour, opacityValue){
+    colour = VarRGB.fromRGB(colour);
+    colour.opacity = opacityValue;
+    mapping.put(newVal, colour);
+    //Refresh = true;
+    player.message("Toggled " +newVal + " search");
+};
+saveListTask = fun (args...){
+   file = new File(File.getDirectory().getAbsolutePath() + '/highlight.json');
+   mapping_fixed = {};
+   foreach(strings: mapping){
+       value = mapping.get(strings);
+       if (value.instanceOf(List.type)){
+           mapping_fixed.put(strings, value);
+       }
+       else if (value.instanceOf(VarRGB.type)){
+           mapping_fixed.put(strings, value.toList());
+       }
+       else if (value.instanceOf(RGB.type)){
+           mapping_fixed.put(strings, [value.R, value.G, value.B]);
+       }
+   }
+   Json.fromMap(mapping_fixed).writeToFile(file);
+   player.message('File written to '+ file.getAbsolutePath());
+};
+loadListTask = fun (args...){
+   file = new File(File.getDirectory().getAbsolutePath() + '/highlight.json');
+   mapping_fixed = Json.fromString(file.read()).getValue();
+   foreach (keys : mapping_fixed){
+       value = mapping_fixed.get(keys);
+       mapping.put(keys, VarRGB.fromList(value));
+   }
+   player.message('File loaded from '+ file.getAbsolutePath());
+};
 addSearchRGBTask = fun (newVal,r,g,b){
     mapping.put(newVal, new VarRGB(r,g,b));
+    //Refresh = true;
+    player.message("Toggled " +newVal + " search");
+};
+addSearchRGBOpacityTask = fun (newVal,r,g,b, o){
+    mapping.put(newVal, new VarRGB(r,g,b,o));
     //Refresh = true;
     player.message("Toggled " +newVal + " search");
 };
@@ -432,10 +515,13 @@ functionMapping = {
 spawnableBlockMapping = {
 
 };
+opacityMapping = {
 
+};
 addSearchAdvanceTask = fun (newVal, propertyName, propertyValue, colour) {
     accessKey = newVal + "_" + propertyName +'_'+ propertyValue ;
     predicateKey = predicateBlockProperty(newVal, propertyName, PropertySuggester.parseValue(propertyValue));
+    colour = VarRGB.fromRGB(colour);
     mapping.put(predicateKey, colour);
     functionMapping.put(accessKey, predicateKey);
     //Refresh = true;
@@ -443,6 +529,26 @@ addSearchAdvanceTask = fun (newVal, propertyName, propertyValue, colour) {
 };
 addSearchBiomeTask = fun (biomeName, colour) {
     predicateKey = predicateBiome(biomeName.lowercase());
+    colour = VarRGB.fromRGB(colour);
+    mapping.put(predicateKey, colour);
+    functionMapping.put(biomeName, predicateKey);
+    //Refresh = true;
+    player.message("Toggled " + "Biome[" + biomeName + "] search");
+};
+addSearchAdvanceOpacityTask = fun (newVal, propertyName, propertyValue, colour, opacityValue) {
+    accessKey = newVal + "_" + propertyName +'_'+ propertyValue ;
+    predicateKey = predicateBlockProperty(newVal, propertyName, PropertySuggester.parseValue(propertyValue));
+    colour = VarRGB.fromRGB(colour);
+    colour.opacity = opacityValue;
+    mapping.put(predicateKey, colour);
+    functionMapping.put(accessKey, predicateKey);
+    //Refresh = true;
+    player.message("Toggled " + newVal + "[" + propertyName +':'+ propertyValue + "] search");
+};
+addSearchBiomeOpacityTask = fun (biomeName, colour, opacityValue) {
+    predicateKey = predicateBiome(biomeName.lowercase());
+    colour = VarRGB.fromRGB(colour);
+    colour.opacity = opacityValue;
     mapping.put(predicateKey, colour);
     functionMapping.put(biomeName, predicateKey);
     //Refresh = true;
@@ -454,7 +560,22 @@ removeSearchTask = fun (val){
         player.message("Removed " +val + " search");
     }
 };
-
+notifySearchTask = fun (val, bool){
+    if (mapping.getKeys().contains(val)){
+        value = mapping.get(val);
+        value.notify = bool;
+        value.name = val;
+        player.message("Now notifying " +val + " is set to " + value.notify);
+    }
+};
+notifySearchToggleTask = fun (val){
+    if (mapping.getKeys().contains(val)){
+        value = mapping.get(val);
+        value.notify = !value.notify;
+        value.name = val;
+        player.message("Now notifying " +val + " is set to " + value.notify);
+    }
+};
 setOpacityTask = fun (newOpacity){
     opacity = newOpacity;
     player.message("Opacity is now set to "+ newOpacity + " 0-Transluent, 255 - Full");
@@ -485,9 +606,9 @@ setCompareStrategyTask = fun (newStrategy){
 };
 setMaxDistanceTask = fun (newDistance){
     maxDistance = newDistance;
-    //xreach = maxDistance;
-    //yreach = maxDistance;
-    //zreach = maxDistance;
+    xreach = maxDistance;
+    yreach = maxDistance;
+    zreach = maxDistance;
     player.message("Max distance is set to : "+ maxDistance);
 };
 addSpwanableBlockTask = fun (blockName){
@@ -498,14 +619,51 @@ removeSpwanableBlockTask = fun (blockName){
     spawnableBlockMapping.remove(blockName);
     player.message("Removed spawnable block : "+ blockName);
 };
+searchOnceTask = fun (blockName){
+    r = 128;
+    searchRadiusOnceTask(blockName, r);
+
+};
+searchRadiusOnceTask = fun (blockName, radius){
+    searchRadiusOnceMaxTask(blockName, radius, 1);
+};
+searchRadiusOnceMaxTask = fun (blockName, radius, maxcount){
+    pos1 = player.getPos().subtract(radius, radius, radius);
+    pos2 = player.getPos().add(radius, radius, radius);
+    _i = 0;
+    Thread.runThreaded(
+        fun () {
+            foreach ( positions : world.getPositions(pos1, pos2)){
+                if (world.getBlockAt(positions).getId().contains(blockName)){
+                    player.message("Found block at : "+ positions);
+                    _i ++;
+                    if (maxcount != -1 && _i >= maxcount){
+                        player.message("Finished finding");
+                        return;
+                    }
+                }
+            }
+            player.message("Finished finding");
+        }
+    );
+};
 addLightLevelTask = fun (lightlevel, color){
     lightLevelKey = 'light_' + lightlevel;
     player.message("Now refreshing is set to : "+ Refresh + ", if you need to toggle, run /highlight toggleRefresh");
     functionMapping.put(lightLevelKey , generatePredicateLightLevelAndSolidAtPos(lightlevel));
+    colour = VarRGB.fromRGB(colour);
     mapping .put( functionMapping.get(lightLevelKey), color );
     player.message("Added lightlevel spawn search task  : "+ lightLevelKey);
 };
-
+addLightLevelOpacityTask = fun (lightlevel, color, opacityValue){
+    lightLevelKey = 'light_' + lightlevel;
+    player.message("Now refreshing is set to : "+ Refresh + ", if you need to toggle, run /highlight toggleRefresh");
+    functionMapping.put(lightLevelKey , generatePredicateLightLevelAndSolidAtPos(lightlevel));
+    colour = VarRGB.fromRGB(colour);
+    colour.opacity = opacityValue;
+    mapping .put( functionMapping.get(lightLevelKey), color );
+    player.message("Added lightlevel spawn search task  : "+ lightLevelKey);
+};
 removeAdvance = fun (advancedKey){
     if (functionMapping.get(advancedKey) == null){
         return;
@@ -529,6 +687,9 @@ setAreaTask = fun (x,y,z,ex,ey,ez){
     endPos = new Pos(ex,ey,ez);
     player.message("Area now selected from "+ startPos + " to " + endPos);
 };
+new LinearCommand([['highlight'], ['manualSearch'], ['string', 'Word', DefaultSuggester.BLOCKS]], searchOnceTask).process();
+new LinearCommand([['highlight'], ['manualSearch'], ['string', 'Word', DefaultSuggester.BLOCKS], ['radius', 'Integer', 0, 256]], searchRadiusOnceTask).process();
+new LinearCommand([['highlight'], ['manualSearch'], ['string', 'Word', DefaultSuggester.BLOCKS], ['radius', 'Integer', 0, 256], ['maxCount', 'Integer', 0, 256]], searchRadiusOnceMaxTask).process();
 new LinearCommand([['highlight'], ['compareOptions'], ['strategy', 'Word', compareOptions.getKeys()]], setStrategyTask).process();
 new LinearCommand([['highlight'], ['setStrategy'], ['strategy', 'Word', options.getKeys()]], setStrategyTask).process();
 new LinearCommand([['highlight'], ['renderOnce']], renderOnceTask).process();
@@ -540,16 +701,25 @@ new LinearCommand([['highlight'], ['setFixedCenter']], setCenterFollowTask).proc
 new LinearCommand([['highlight'], ['setAreaAnalyze'], ['x', 'Integer'],['y', 'Integer'],['z', 'Integer'], ['ex', 'Integer'],['ey', 'Integer'],['ez', 'Integer']], setAreaTask).process();
 new LinearCommand([['highlight'], ['setAreaAnalyze'], ['cancel']], fun(){startPos =null;}).process();
 new LinearCommand([['highlight'], ['disableFixedCenter']], centerOffTask).process();
-new LinearCommand([['highlight'], ['addSpawnableBlock'], ['string', 'Word', DefaultSuggester.BLOCKS]], addSpwanableBlockTask).process();
 new LinearCommand([['highlight'], ['removeSpawnableBlock'], ['string', 'Word', suggesterRemoveBlock]], removeSpwanableBlockTask).process();
 new LinearCommand([['highlight'], ['remove'], ['string', 'Word', suggesterRemove]], removeSearchTask).process();
+new LinearCommand([['highlight'], ['notify'], ['string', 'Word', suggesterRemove], ['boolean', 'Boolean']], notifySearchTask).process();
+new LinearCommand([['highlight'], ['notify'], ['string', 'Word', suggesterRemove]], notifySearchToggleTask).process();
 new LinearCommand([['highlight'], ['removeAdvanced'],['string', 'Word', functionMapping.getKeys()]], removeAdvance).process();
+new LinearCommand([['highlight'], ['lightLevel'], ['add'], ['level', 'Integer', 0, 15], ['color', 'Enum', RGB.type], ['opacity', 'Integer', 0, 255]], addLightLevelOpacityTask).process();
 new LinearCommand([['highlight'], ['lightLevel'], ['add'], ['level', 'Integer', 0, 15], ['color', 'Enum', RGB.type]], addLightLevelTask).process();
+new LinearCommand([['highlight'], ['add'], ['string', 'Word', DefaultSuggester.BLOCKS], ['property'], ['propertyName', 'Word', PropertySuggester.getProperties], ['propertyValue', 'Word', PropertySuggester.getPropertyValues], ['color', 'Enum', RGB.type], ['opacity', 'Integer', 0, 255]], addSearchAdvanceOpacityTask).process();
+new LinearCommand([['highlight'], ['add'], ['string', 'Word', DefaultSuggester.BLOCKS], ['color', 'Enum', RGB.type], ['opacity', 'Integer', 0, 255]], addSearchOpacityTask).process();
+new LinearCommand([['highlight'], ['addBiome'], ['string', 'Word', DefaultSuggester.BIOMES], ['color', 'Enum', RGB.type], ['opacity', 'Integer', 0, 255]], addSearchBiomeOpacityTask).process();
+new LinearCommand([['highlight'], ['add'], ['string', 'Word', DefaultSuggester.BLOCKS], ['R', 'Integer', 0, 255], ['G', 'Integer', 0, 255], ['B', 'Integer', 0, 255], ['opacity', 'Integer', 0, 255]], addSearchRGBOpacityTask).process();
+new LinearCommand([['highlight'], ['addSpawnableBlock'], ['string', 'Word', DefaultSuggester.BLOCKS]], addSpwanableBlockTask).process();
 new LinearCommand([['highlight'], ['add'], ['string', 'Word', DefaultSuggester.BLOCKS], ['property'], ['propertyName', 'Word', PropertySuggester.getProperties], ['propertyValue', 'Word', PropertySuggester.getPropertyValues], ['color', 'Enum', RGB.type]], addSearchAdvanceTask).process();
 new LinearCommand([['highlight'], ['add'], ['string', 'Word', DefaultSuggester.BLOCKS], ['color', 'Enum', RGB.type]], addSearchTask).process();
 new LinearCommand([['highlight'], ['addBiome'], ['string', 'Word', DefaultSuggester.BIOMES], ['color', 'Enum', RGB.type]], addSearchBiomeTask).process();
 new LinearCommand([['highlight'], ['add'], ['string', 'Word', DefaultSuggester.BLOCKS], ['R', 'Integer', 0, 255], ['G', 'Integer', 0, 255], ['B', 'Integer', 0, 255]], addSearchRGBTask).process();
 new LinearCommand([['highlight'], ['setXDistance'], ['distance', 'Integer',1,255]], xdistanceTask).process();
+new LinearCommand([['highlight'], ['save']], saveListTask).process();
+new LinearCommand([['highlight'], ['load']], loadListTask).process();
 new LinearCommand([['highlight'], ['xThreads'], ['distance', 'Integer',1,4]], xThreadChangeTask).process();
 new LinearCommand([['highlight'], ['yThreads'], ['distance', 'Integer',1,4]], yThreadChangeTask).process();
 new LinearCommand([['highlight'], ['zThreads'], ['distance', 'Integer',1,4]], zThreadChangeTask).process();
@@ -559,6 +729,7 @@ new LinearCommand([['highlight'], ['opacity'], ['opacityValue', 'Integer',0,255]
 new LinearCommand([['highlight'], ['outlinePixelWidth'], ['width', 'Integer',0,30]], setOutlinePixelWidth).process();
 new LinearCommand([['highlight'], ['outlineColor'], ['color', 'Enum', RGB.type]], setOutlineColorFromRGB).process();
 new LinearCommand([['highlight'], ['setRenderThroughBlocks'], ['options', 'Boolean']], setRenderThroughBlocks).process();
+new LinearCommand([['highlight'], ['refresh']], refresh).process();
 //highlightJavaPredicate(predicate);
 thread = Thread.runThreaded(fun (){highlightJavaPredicateColor(predicateMap, mapping);});
 //thread = Thread.runThreaded(fun (){highlightJavaPredicateColorBlock(predicateMapBlock, mapping);});
